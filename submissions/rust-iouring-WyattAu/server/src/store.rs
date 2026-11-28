@@ -21,6 +21,10 @@ pub struct Roots {
 pub struct Store {
     pub writer: Connection,
     pub reader: Option<ReaderStore>,
+    /// Rule-2-compliant read path: SQLite's own B-tree cursor API via
+    /// the unmodified amalgamation. Tried first; falls back to the mmap
+    /// reader, then bundled SQLite (the degradation ladder, R7).
+    pub shim: Option<std::cell::RefCell<crate::shim_reader::ShimReader>>,
     pub roots: Roots,
     pub started: std::time::Instant,
     /// Keyed once at startup (P3: midstate reuse); cloned per request.
@@ -96,9 +100,17 @@ impl Store {
         }
 
         let reader = Store::open_reader(path).ok();
+        let shim = match crate::shim_reader::ShimReader::open(path, &roots) {
+            Ok(s) => Some(std::cell::RefCell::new(s)),
+            Err(e) => {
+                eprintln!("store: shim reader unavailable ({e}); reads fall back");
+                None
+            }
+        };
         Ok(Self {
             writer,
             reader,
+            shim,
             roots,
             started: std::time::Instant::now(),
             keyed_mac: KeyedMac::new(jwt_secret.as_bytes()),
@@ -130,6 +142,15 @@ impl Store {
     /// Advance the reader snapshot to the WAL end after write batches
     /// committed through the writer connection.
     pub fn refresh_snapshot(&mut self) {
+        // shim per-pass snapshot: end the previous read txn, start a
+        // fresh one (rule 5: reads as-of the serving pass). A fault
+        // disables the shim (falls back to the mmap reader / bundled).
+        if let Some(shim) = &self.shim {
+            if shim.borrow_mut().begin_pass().is_err() {
+                eprintln!("store: shim begin_pass failed; disabling shim");
+                self.shim = None;
+            }
+        }
         if let Some(r) = self.reader.as_mut() {
             let before = r.snapshot();
             if let Err(e) = r.refresh() {

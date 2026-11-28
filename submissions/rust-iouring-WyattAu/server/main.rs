@@ -1,0 +1,34 @@
+//! The $12 Server Challenge submission binary.
+//! Config comes only from env (SPEC.md): SQLITE_PATH, JWT_SECRET, HOST, PORT.
+
+// allocator A/B (C10): --features mimalloc swaps the global allocator
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+pub mod config;
+pub mod shim_reader;
+pub mod handlers;
+pub mod jwt;
+pub mod router;
+pub mod loop_;
+pub mod store;
+
+fn main() {
+    let cfg = config::Config::from_env().unwrap_or_else(|e| {
+        eprintln!("config: {e}");
+        std::process::exit(2);
+    });
+    let mut server = loop_::Server::new(cfg.clone()).unwrap_or_else(|e| {
+        eprintln!("server init: {e}");
+        std::process::exit(1);
+    });
+    eprintln!(
+        "feed-server: sqlite={} listening on {}:{}",
+        cfg.sqlite_path, cfg.host, cfg.port
+    );
+    if let Err(e) = server.run() {
+        eprintln!("event loop failed: {e}");
+        std::process::exit(1);
+    }
+}

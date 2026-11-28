@@ -28,12 +28,21 @@ impl MappedFile {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let file = File::open(path)?;
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        // hugepages for the B-tree mapping: TLB-miss reduction on
+        // pointer-chasing page walks (best-effort — needs THP enabled)
+        let _ = mmap.advise(memmap2::Advice::HugePage);
         Ok(Self { file, mmap })
     }
 
     /// Map `path` with the given base offset already applied upstream.
     pub fn len(&self) -> usize {
         self.mmap.len()
+    }
+
+    /// fstat on the held fd — cheaper than `metadata(path)` (no path
+    /// walk) for the per-refresh WAL size check.
+    pub fn metadata(&self) -> io::Result<std::fs::Metadata> {
+        self.file.metadata()
     }
 
     pub fn is_empty(&self) -> bool {

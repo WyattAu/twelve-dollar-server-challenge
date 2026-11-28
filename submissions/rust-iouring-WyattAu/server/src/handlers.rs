@@ -168,19 +168,57 @@ pub fn reader_username(store: &Store, user_id: i64) -> Result<Option<Vec<u8>>, R
 /// views into the mmap and resolving authors/counts per row. No PostFull
 /// intermediates. JOIN semantics preserved (posts without users drop).
 pub fn reader_feed_emit(store: &Store, max: usize, out: &mut Vec<u8>) -> Result<(), ReaderError> {
+    // rule-2-compliant path first: SQLite's own B-tree API (the shim).
+    // A shim fault falls through to the mmap reader, then bundled (R7).
+    if let Some(shim) = &store.shim {
+        // rule 2 (ruling 2026-11-28): reads go through SQLite's own
+        // B-tree API — the mmap reader is off the path entirely. A shim
+        // fault yields Err, which the caller's bundled-SQLite fallback
+        // (rule-2-legal: it IS SQLite) serves.
+        if crate::shim_reader::feed_emit(&mut shim.borrow_mut(), max, out).is_ok() {
+            return Ok(());
+        }
+        out.clear();
+        return Err(ReaderError::OutOfRange);
+    }
     let r = store.reader().ok_or(ReaderError::OutOfRange)?;
     let roots = &store.roots;
-    let mut cur = Cursor::table(r, roots.posts)?;
     out.reserve(4096);
     out.extend_from_slice(b"{\"posts\":[");
+
+    // pass A: collect the feed's post ids (descending rowids)
+    let mut ids: Vec<i64> = Vec::with_capacity(max);
+    {
+        let mut cur = Cursor::table(r, roots.posts)?;
+        if cur.last()? != Step::Moved {
+            out.push(b']');
+            out.push(b'}');
+            return Ok(());
+        }
+        loop {
+            ids.push(cur.rowid()?);
+            if ids.len() == max || cur.prev()? != Step::Moved {
+                break;
+            }
+        }
+    }
+
+    // CL-001b: ONE batch index walk (single B-tree descent) instead of
+    // one root-to-leaf walk per row — the 51%-of-Ir class
+    let mut ids_asc = ids.clone();
+    ids_asc.reverse();
+    let mut scan = IndexScan::new(r, roots.likes_idx)?;
+    let counts = scan.count_each(&ids_asc)?;
+
+    // pass B: decode + emit (author resolve unchanged)
+    let mut cur = Cursor::table(r, roots.posts)?;
+    let mut ucur = Cursor::table(r, roots.users)?;
     let mut emitted = 0usize;
     if cur.last()? != Step::Moved {
         out.push(b']');
         out.push(b'}');
         return Ok(());
     }
-    let mut ucur = Cursor::table(r, roots.users)?;
-    let mut scan = IndexScan::new(r, roots.likes_idx)?;
     loop {
         let id = cur.rowid()?;
         let payload = cur.payload()?;
@@ -225,7 +263,13 @@ pub fn reader_feed_emit(store: &Store, max: usize, out: &mut Vec<u8>) -> Result<
             }
             &up[uf[1].offset..uf[1].offset + uf[1].len]
         };
-        let like_count = scan.count_prefix(id)?;
+        // batch-precomputed count: position in the descending id list
+        let like_count = {
+            let pos = ids
+                .binary_search_by(|probe| id.cmp(probe))
+                .expect("feed id must be in the batched set");
+            counts[pos]
+        };
         // emit row: {"id":N,"body":"…","created_at":"…","author":"…","like_count":N}
         if emitted > 0 {
             out.push(b',');
@@ -266,6 +310,16 @@ pub fn reader_post_get_emit(
     id: i64,
     out: &mut Vec<u8>,
 ) -> Result<bool, ReaderError> {
+    // shim first (rule 2 path); mmap reader as the fallback
+    if let Some(shim) = &store.shim {
+        let mut buf = Vec::with_capacity(2048);
+        if let Ok(found) = crate::shim_reader::post_get_emit(&mut shim.borrow_mut(), id, &mut buf) {
+            out.extend_from_slice(&buf);
+            return Ok(found);
+        }
+        out.clear();
+        return Err(ReaderError::OutOfRange);
+    }
     let r = store.reader().ok_or(ReaderError::OutOfRange)?;
     let mut cur = Cursor::table(r, store.roots.posts)?;
     if cur.table_seek(id)? != TableSeek::Found {
@@ -539,5 +593,43 @@ mod tests {
         let lc = reader_like_count(&store, id).unwrap();
         assert_eq!(lc, 1, "fresh like visible after commit+refresh");
         let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("handlers-{}", std::process::id())));
+    }
+}
+
+#[cfg(test)]
+mod ranking {
+    use super::*;
+    use crate::store::Store;
+
+    /// In-process hotspot driver for callgrind (ch53-style ranking):
+    /// valgrind --tool=callgrind cargo test --release ranking_driver
+    /// then callgrind_annotate. Exercises feed emit + post get + parse.
+    #[test]
+    fn ranking_driver() {
+        let db = std::env::var("RANKING_DB")
+            .unwrap_or_else(|_| "/home/wyatt/.cache/calib/seed.db".to_string());
+        let Ok(store) = Store::open(&db, "calib-secret") else {
+            eprintln!("ranking driver: no seed DB — skipping");
+            return;
+        };
+        let mut out = Vec::with_capacity(1 << 16);
+        let req_bytes: &[u8] =
+            b"GET /posts/42 HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer abc\r\n\r\n";
+
+        // warm-up
+        let _ = reader_feed_emit(&store, 25, &mut out);
+        let _ = reader_post_get_emit(&store, 42, &mut out);
+        let _ = uring_http::http::parse(req_bytes);
+
+        // measured loop: 1000 hot-path iterations
+        for i in 0..1000i64 {
+            out.clear();
+            let id = 1 + (i % 50000);
+            let _ = reader_feed_emit(&store, 25, &mut out);
+            let _ = reader_post_get_emit(&store, id, &mut out);
+            let parsed = uring_http::http::parse(req_bytes).expect("parses");
+            std::hint::black_box(parsed);
+            std::hint::black_box(&out);
+        }
     }
 }

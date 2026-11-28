@@ -17,4 +17,4 @@ memmap2 = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest.workspace = true
-rusqlite.workspace = true
+rusqlite = { workspace = true, features = ["bundled"] }

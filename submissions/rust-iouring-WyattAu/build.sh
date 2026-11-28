@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Builds the server as a normal user. Dependencies are pinned:
+# Builds the server as a normal user. Pinned dependencies:
 # - crates via Cargo.lock (committed)
-# - uring-kit via git rev a811d22a1d4500d065e5e7d26402b430690165b7
-# - SQLite amalgamation via rusqlite "bundled" (cargo fetches + builds it;
-#   the build is reproducible from the lockfile)
+# - uring-kit/sqlite-btree/uring-http via crates.io version pins in Cargo.toml
+# - SQLite amalgamation: vendored UNMODIFIED source at
+#   crates/sqlite-ffi/csrc/sqlite3.c (compiled from source by build.rs,
+#   rule 10; no prebuilt binaries)
 set -euo pipefail
 cd "$(dirname "$0")"
 

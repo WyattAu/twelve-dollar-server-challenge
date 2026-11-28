@@ -1,7 +1,13 @@
 //! The $12 Server Challenge submission binary.
 //! Config comes only from env (SPEC.md): SQLITE_PATH, JWT_SECRET, HOST, PORT.
 
+// allocator A/B (C10): --features mimalloc swaps the global allocator
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 pub mod config;
+pub mod shim_reader;
 pub mod handlers;
 pub mod jwt;
 pub mod router;

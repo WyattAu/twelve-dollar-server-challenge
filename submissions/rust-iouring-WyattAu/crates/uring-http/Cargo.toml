@@ -9,4 +9,4 @@ categories = ["network-programming"]
 [dependencies]
 io-uring.workspace = true
 libc.workspace = true
-sqlite-btree = { path = "../sqlite-btree" }
+sqlite-btree = { path = "../sqlite-btree", version = "0.1.0" }

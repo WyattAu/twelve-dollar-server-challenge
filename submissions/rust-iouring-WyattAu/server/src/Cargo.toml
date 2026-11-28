@@ -1,0 +1,25 @@
+[package]
+name = "feed-server"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "The $12 Server Challenge submission: five endpoints on sqlite-btree + uring-http"
+
+[dependencies]
+uring-http = { path = "../crates/uring-http", version = "0.1.0" }
+sqlite-btree = { path = "../crates/sqlite-btree", version = "0.1.0" }
+sqlite-ffi = { path = "../crates/sqlite-ffi" }
+io-uring.workspace = true
+libc.workspace = true
+# F26 lever: hand-written SHA-NI kernels (runtime-detected via cpufeatures)
+# — the HMAC-SHA256 verify runs once per authed request
+sha2 = { version = "0.10", features = ["asm"] }
+rusqlite.workspace = true
+uring-kit.workspace = true
+hmac = "0.12"
+base64 = "0.22"
+mimalloc = { version = "0.1", optional = true }
+
+[features]
+# allocator A/B (C10): cargo build --release --features mimalloc
+mimalloc = ["dep:mimalloc"]
